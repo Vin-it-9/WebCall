@@ -83,11 +83,32 @@
         let username;
         let roomId;
 
-        // STUN servers configuration for helping with NAT traversal
+        // STUN/TURN servers configuration - UPDATED with free public servers
         const configuration = {
             iceServers: [
+                // Google's public STUN servers
                 { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+
+                // Free TURN servers for development (from openrelay.metered.ca)
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
             ]
         };
 
@@ -102,6 +123,8 @@
             }
 
             try {
+                connectionStatus.textContent = 'Getting media permissions...';
+
                 // Get local media stream
                 localStream = await navigator.mediaDevices.getUserMedia({
                     video: true,
@@ -110,6 +133,7 @@
 
                 // Display local video
                 localVideo.srcObject = localStream;
+                connectionStatus.textContent = 'Connecting to signaling server...';
 
                 // Connect to signaling server
                 connectToSignalingServer();
@@ -121,9 +145,9 @@
                 joinBtn.disabled = true;
                 usernameInput.disabled = true;
                 roomIdInput.disabled = true;
-                connectionStatus.textContent = 'Connected to room: ' + roomId;
             } catch (err) {
                 console.error('Error accessing media devices:', err);
+                connectionStatus.textContent = 'Error: ' + err.message;
                 alert('Could not access camera or microphone. Please check permissions.');
             }
         });
@@ -137,6 +161,7 @@
 
             socket.onopen = () => {
                 console.log('Connected to signaling server');
+                connectionStatus.textContent = 'Connected to signaling server';
                 // Send join room message
                 sendSignalingMessage({
                     type: 'join',
@@ -145,39 +170,53 @@
             };
 
             socket.onmessage = async (event) => {
-                const message = JSON.parse(event.data);
+                try {
+                    console.log('Received message:', event.data);
+                    const message = JSON.parse(event.data);
 
-                // Handle different message types from the signaling server
-                switch(message.type) {
-                    case 'join':
-                        handleUserJoined(message);
-                        break;
-                    case 'offer':
-                        await handleOffer(message);
-                        break;
-                    case 'answer':
-                        await handleAnswer(message);
-                        break;
-                    case 'ice-candidate':
-                        await handleIceCandidate(message);
-                        break;
-                    case 'leave':
-                        handleUserLeft();
-                        break;
+                    // Handle different message types from the signaling server
+                    switch(message.type) {
+                        case 'join':
+                            connectionStatus.textContent = 'User joined: ' + message.username;
+                            handleUserJoined(message);
+                            break;
+                        case 'offer':
+                            connectionStatus.textContent = 'Received offer, creating answer...';
+                            await handleOffer(message);
+                            break;
+                        case 'answer':
+                            connectionStatus.textContent = 'Received answer, setting remote description...';
+                            await handleAnswer(message);
+                            break;
+                        case 'ice-candidate':
+                            await handleIceCandidate(message);
+                            break;
+                        case 'leave':
+                            connectionStatus.textContent = 'Remote user left the call';
+                            handleUserLeft();
+                            break;
+                        default:
+                            console.log('Unknown message type:', message.type);
+                    }
+                } catch (error) {
+                    console.error('Error handling message:', error);
                 }
             };
 
             socket.onclose = () => {
                 console.log('Disconnected from signaling server');
+                connectionStatus.textContent = 'Disconnected from server';
             };
 
             socket.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                connectionStatus.textContent = 'WebSocket error';
             };
         }
 
         // Initialize WebRTC peer connection
         function initializePeerConnection() {
+            console.log('Using ICE servers:', configuration.iceServers);
             peerConnection = new RTCPeerConnection(configuration);
 
             // Add local tracks to peer connection
@@ -190,12 +229,17 @@
                 if (remoteVideo.srcObject !== event.streams[0]) {
                     console.log('Received remote stream');
                     remoteVideo.srcObject = event.streams[0];
+                    connectionStatus.textContent = 'Remote video connected!';
                 }
             };
 
             // Handle ICE candidates
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
+                    // Log candidate type for debugging
+                    const candidateType = event.candidate.candidate.split(' ')[7];
+                    console.log('Generated ICE candidate type:', candidateType);
+
                     sendSignalingMessage({
                         type: 'ice-candidate',
                         candidate: event.candidate,
@@ -204,8 +248,22 @@
                 }
             };
 
+            // Monitor ICE connection state
             peerConnection.oniceconnectionstatechange = () => {
                 console.log('ICE connection state:', peerConnection.iceConnectionState);
+                connectionStatus.textContent = 'Connection: ' + peerConnection.iceConnectionState;
+
+                if (peerConnection.iceConnectionState === 'connected' ||
+                    peerConnection.iceConnectionState === 'completed') {
+                    connectionStatus.textContent = 'Connection established successfully!';
+                } else if (peerConnection.iceConnectionState === 'failed') {
+                    connectionStatus.textContent = 'Connection failed - check console for details';
+                }
+            };
+
+            // Monitor ICE gathering state
+            peerConnection.onicegatheringstatechange = () => {
+                console.log('ICE gathering state:', peerConnection.iceGatheringState);
             };
         }
 
@@ -216,9 +274,11 @@
             // Create and send an offer if we're the initiator
             if (message.initiator) {
                 try {
+                    connectionStatus.textContent = 'Creating offer...';
                     const offer = await peerConnection.createOffer();
                     await peerConnection.setLocalDescription(offer);
 
+                    connectionStatus.textContent = 'Sending offer...';
                     sendSignalingMessage({
                         type: 'offer',
                         sdp: peerConnection.localDescription,
@@ -226,6 +286,7 @@
                     });
                 } catch (err) {
                     console.error('Error creating offer:', err);
+                    connectionStatus.textContent = 'Error creating offer';
                 }
             }
         }
@@ -233,11 +294,14 @@
         // Handle an offer from another peer
         async function handleOffer(message) {
             try {
+                connectionStatus.textContent = 'Processing offer...';
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
 
+                connectionStatus.textContent = 'Creating answer...';
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
 
+                connectionStatus.textContent = 'Sending answer...';
                 sendSignalingMessage({
                     type: 'answer',
                     sdp: peerConnection.localDescription,
@@ -245,15 +309,19 @@
                 });
             } catch (err) {
                 console.error('Error handling offer:', err);
+                connectionStatus.textContent = 'Error processing offer';
             }
         }
 
         // Handle an answer from another peer
         async function handleAnswer(message) {
             try {
+                connectionStatus.textContent = 'Processing answer...';
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+                connectionStatus.textContent = 'Connection in progress...';
             } catch (err) {
                 console.error('Error handling answer:', err);
+                connectionStatus.textContent = 'Error processing answer';
             }
         }
 
@@ -261,6 +329,9 @@
         async function handleIceCandidate(message) {
             try {
                 if (message.candidate) {
+                    const candidateType = message.candidate.candidate.split(' ')[7];
+                    console.log('Received ICE candidate type:', candidateType);
+
                     await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
                 }
             } catch (err) {
@@ -277,7 +348,11 @@
         // Send message to signaling server
         function sendSignalingMessage(message) {
             if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log('Sending message:', message);
                 socket.send(JSON.stringify(message));
+            } else {
+                console.error('Socket not open, cannot send message:', message);
+                connectionStatus.textContent = 'Not connected to server';
             }
         }
 
@@ -304,7 +379,7 @@
             joinBtn.disabled = false;
             usernameInput.disabled = false;
             roomIdInput.disabled = false;
-            connectionStatus.textContent = '';
+            connectionStatus.textContent = 'Disconnected';
         });
 
         // Toggle audio mute
@@ -314,6 +389,7 @@
                 if (audioTrack) {
                     audioTrack.enabled = !audioTrack.enabled;
                     muteAudioBtn.classList.toggle('bg-red-600');
+                    muteAudioBtn.title = audioTrack.enabled ? 'Mute Audio' : 'Unmute Audio';
                 }
             }
         });
@@ -325,6 +401,7 @@
                 if (videoTrack) {
                     videoTrack.enabled = !videoTrack.enabled;
                     muteVideoBtn.classList.toggle('bg-red-600');
+                    muteVideoBtn.title = videoTrack.enabled ? 'Turn Off Camera' : 'Turn On Camera';
                 }
             }
         });

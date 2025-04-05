@@ -121,7 +121,7 @@
 
 <script>
     document.addEventListener('DOMContentLoaded', () => {
-
+        // DOM elements
         const joinBtn = document.getElementById('joinBtn');
         const hangupBtn = document.getElementById('hangupBtn');
         const muteAudioBtn = document.getElementById('muteAudioBtn');
@@ -142,216 +142,321 @@
         let username;
         let roomId;
         let isInitiator = false;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        let pingInterval;
+        let socketReconnectTimeout;
 
-        // STUN/TURN servers - SIMPLIFIED FOR RELIABILITY
+        // STUN/TURN servers
         const configuration = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
                 {
                     urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
                     username: 'openrelayproject',
                     credential: 'openrelayproject'
                 }
             ]
         };
 
+        // Join button click handler
         joinBtn.addEventListener('click', async () => {
             username = usernameInput.value.trim();
             roomId = roomIdInput.value.trim();
 
             if (!username || !roomId) {
-                alert('Please enter both a username and room ID');
+                updateStatus('Please enter both a username and room ID');
                 return;
             }
 
             try {
-
+                // Get local media stream
                 localStream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 640, height: 480 },
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    },
                     audio: true
                 });
 
+                // Display local video
                 localVideo.srcObject = localStream;
-                connectionStatus.textContent = "Local video active. Connecting...";
+                updateStatus('Connecting to signaling server...');
 
+                // Connect to signaling server
                 connectToSignalingServer();
 
+                // Update UI
                 joinBtn.disabled = true;
                 usernameInput.disabled = true;
                 roomIdInput.disabled = true;
             } catch (err) {
                 console.error('Error accessing media devices:', err);
-                alert('Could not access camera or microphone: ' + err.message);
+                updateStatus('Error: ' + err.message);
             }
         });
 
         function connectToSignalingServer() {
+            // Clear any existing reconnection timeout
+            if (socketReconnectTimeout) {
+                clearTimeout(socketReconnectTimeout);
+            }
+
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/signal/${username}`;
 
-            socket = new WebSocket(wsUrl);
+            updateStatus('Connecting to: ' + wsUrl);
 
-            socket.onopen = () => {
-                console.log('Connected to signaling server');
-                signalingStatus.textContent = 'Connected';
+            try {
+                socket = new WebSocket(wsUrl);
 
-                socket.send(JSON.stringify({
-                    type: 'join',
-                    room: roomId
-                }));
-            };
+                socket.onopen = () => {
+                    console.log('Connected to signaling server');
+                    signalingStatus.textContent = 'Connected';
+                    updateStatus('Connected to signaling server');
+                    reconnectAttempts = 0;
 
-            socket.onmessage = async (event) => {
-                console.log('Received message:', event.data);
-                const message = JSON.parse(event.data);
+                    // Send join room message
+                    sendSignalingMessage({
+                        type: 'join',
+                        room: roomId
+                    });
 
-                switch (message.type) {
-                    case 'join':
-                        console.log(`User ${message.username} joined. Initiator: ${message.initiator}`);
-                        isInitiator = message.initiator;
-
-                        if (!peerConnection) {
-                            createPeerConnection();
-
-                            if (isInitiator) {
-                                connectionStatus.textContent = "You're the first user. Waiting for another user to join.";
-                            } else {
-                                connectionStatus.textContent = "Connected to room with existing user. Creating offer...";
-                                createOffer();
-                            }
+                    // Setup ping interval to keep connection alive (every 15 seconds)
+                    clearInterval(pingInterval);
+                    pingInterval = setInterval(() => {
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            sendSignalingMessage({
+                                type: 'ping',
+                                room: roomId,
+                                timestamp: Date.now()
+                            });
                         }
-                        break;
+                    }, 15000);
+                };
 
-                    case 'offer':
-                        console.log('Received offer');
-                        if (!peerConnection) {
-                            createPeerConnection();
+                socket.onmessage = async (event) => {
+                    try {
+                        console.log('Received message:', event.data);
+                        const message = JSON.parse(event.data);
+
+                        if (message.type === 'pong') {
+                            console.log('Received pong from server');
+                            return;
                         }
-                        await handleOffer(message);
-                        break;
 
-                    case 'answer':
-                        console.log('Received answer');
-                        await handleAnswer(message);
-                        break;
+                        switch (message.type) {
+                            case 'join':
+                                console.log('Join message received. User:', message.username, 'Initiator:', message.initiator);
+                                isInitiator = message.initiator;
 
-                    case 'ice-candidate':
-                        console.log('Received ICE candidate');
-                        await handleIceCandidate(message);
-                        break;
+                                // Initialize peer connection
+                                if (!peerConnection) {
+                                    createPeerConnection();
 
-                    case 'leave':
-                        console.log('User left');
-                        handleUserLeft();
-                        break;
-                }
-            };
+                                    // If we're the second person to join, create the offer
+                                    if (!isInitiator) {
+                                        setTimeout(() => {
+                                            createOffer();
+                                        }, 1000); // Small delay to ensure connection is ready
+                                    }
+                                }
+                                break;
 
-            socket.onclose = () => {
-                console.log('Disconnected from signaling server');
-                signalingStatus.textContent = 'Disconnected';
-            };
+                            case 'offer':
+                                console.log('Offer received');
+                                if (!peerConnection) {
+                                    createPeerConnection();
+                                }
+                                await handleOffer(message);
+                                break;
 
-            socket.onerror = (error) => {
-                console.error('WebSocket error:', error);
-                signalingStatus.textContent = 'Error';
-            };
+                            case 'answer':
+                                console.log('Answer received');
+                                await handleAnswer(message);
+                                break;
+
+                            case 'ice-candidate':
+                                await handleIceCandidate(message);
+                                break;
+
+                            case 'leave':
+                                console.log('User left');
+                                handleUserLeft();
+                                break;
+                        }
+                    } catch (error) {
+                        console.error('Error handling message:', error);
+                    }
+                };
+
+                socket.onclose = (event) => {
+                    console.log('Disconnected from signaling server:', event.code, event.reason);
+                    signalingStatus.textContent = 'Disconnected';
+                    updateStatus('Connection closed. Attempting to reconnect...');
+                    clearInterval(pingInterval);
+
+                    // Attempt to reconnect if not a normal closure and we haven't exceeded max attempts
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        updateStatus(`Reconnecting... Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+
+                        // Exponential backoff for reconnect (1s, 2s, 4s, 8s, 16s)
+                        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 16000);
+
+                        socketReconnectTimeout = setTimeout(() => {
+                            connectToSignalingServer();
+                        }, delay);
+                    }
+                };
+
+                socket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    signalingStatus.textContent = 'Error';
+                    updateStatus('Connection error');
+                };
+            } catch (e) {
+                console.error('Error establishing WebSocket connection:', e);
+                updateStatus('Error connecting to server: ' + e.message);
+            }
+        }
+
+        function updateStatus(message, isError = false) {
+            console.log(`Status: ${message}`);
+            connectionStatus.textContent = message;
+            connectionStatus.className = isError ? 'text-red-600' : 'text-gray-600';
         }
 
         function createPeerConnection() {
             console.log('Creating peer connection');
-            peerConnection = new RTCPeerConnection(configuration);
 
-            localStream.getTracks().forEach(track => {
-                console.log('Adding track to peer connection:', track.kind);
-                peerConnection.addTrack(track, localStream);
-            });
+            try {
+                peerConnection = new RTCPeerConnection(configuration);
 
-            peerConnection.ontrack = (event) => {
-                console.log('Received remote track:', event.track.kind);
-                console.log('Remote stream object:', event.streams[0]);
+                // Add local tracks to peer connection
+                localStream.getTracks().forEach(track => {
+                    console.log('Adding track to peer connection:', track.kind);
+                    peerConnection.addTrack(track, localStream);
+                });
 
-                if (event.streams && event.streams[0]) {
-                    connectionStatus.textContent = "Received remote media stream!";
-                    remoteConnectionState.textContent = "Video connected";
+                // IMPORTANT: This is where remote video stream is handled
+                peerConnection.ontrack = (event) => {
+                    console.log('Received remote track:', event.track.kind);
 
-                    setTimeout(() => {
+                    if (event.streams && event.streams[0]) {
+                        console.log('Setting remote stream');
                         remoteVideo.srcObject = event.streams[0];
-                        remoteVideo.play().catch(e => console.log('Play error:', e));
-                    }, 100);
-                }
-            };
+                        remoteConnectionState.textContent = "Video connected";
+                        updateStatus("Remote video connected!");
+                    }
+                };
 
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    console.log('Generated ICE candidate');
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log('Generated ICE candidate');
 
-                    socket.send(JSON.stringify({
-                        type: 'ice-candidate',
-                        candidate: event.candidate,
-                        room: roomId
-                    }));
-                }
-            };
+                        sendSignalingMessage({
+                            type: 'ice-candidate',
+                            candidate: event.candidate,
+                            room: roomId
+                        });
+                    }
+                };
 
-            peerConnection.oniceconnectionstatechange = () => {
-                console.log('ICE connection state:', peerConnection.iceConnectionState);
-                iceStatus.textContent = peerConnection.iceConnectionState;
+                peerConnection.oniceconnectionstatechange = () => {
+                    console.log('ICE connection state:', peerConnection.iceConnectionState);
+                    iceStatus.textContent = peerConnection.iceConnectionState;
 
-                if (peerConnection.iceConnectionState === 'connected' ||
-                    peerConnection.iceConnectionState === 'completed') {
-                    connectionStatus.textContent = 'WebRTC connection established!';
-                }
-            };
+                    if (peerConnection.iceConnectionState === 'connected' ||
+                        peerConnection.iceConnectionState === 'completed') {
+                        updateStatus('WebRTC connection established!');
+                    } else if (peerConnection.iceConnectionState === 'failed') {
+                        updateStatus('Connection failed - try refreshing the page');
+                    }
+                };
+
+            } catch (err) {
+                console.error('Error creating peer connection:', err);
+                updateStatus('Error creating connection');
+            }
         }
 
         async function createOffer() {
+            if (!peerConnection) return;
+
             try {
+                updateStatus('Creating offer...');
+
                 const offer = await peerConnection.createOffer({
                     offerToReceiveAudio: true,
                     offerToReceiveVideo: true
                 });
 
+                updateStatus('Setting local description...');
                 await peerConnection.setLocalDescription(offer);
 
-                socket.send(JSON.stringify({
+                updateStatus('Sending offer...');
+                sendSignalingMessage({
                     type: 'offer',
                     sdp: peerConnection.localDescription,
                     room: roomId
-                }));
+                });
             } catch (error) {
                 console.error('Error creating offer:', error);
+                updateStatus('Failed to create offer');
             }
         }
 
         async function handleOffer(message) {
+            if (!peerConnection) return;
+
             try {
+                updateStatus('Processing offer...');
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
 
+                updateStatus('Creating answer...');
                 const answer = await peerConnection.createAnswer();
+
+                updateStatus('Setting local description...');
                 await peerConnection.setLocalDescription(answer);
 
-                socket.send(JSON.stringify({
+                updateStatus('Sending answer...');
+                sendSignalingMessage({
                     type: 'answer',
                     sdp: peerConnection.localDescription,
                     room: roomId
-                }));
+                });
             } catch (error) {
                 console.error('Error handling offer:', error);
+                updateStatus('Failed to process offer');
             }
         }
 
         async function handleAnswer(message) {
+            if (!peerConnection) return;
+
             try {
+                updateStatus('Processing answer...');
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+                updateStatus('Remote description set');
             } catch (error) {
                 console.error('Error handling answer:', error);
+                updateStatus('Failed to process answer');
             }
         }
 
         async function handleIceCandidate(message) {
+            if (!peerConnection) return;
+
             try {
-                if (peerConnection && message.candidate) {
+                if (message.candidate) {
                     await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
                 }
             } catch (error) {
@@ -362,7 +467,15 @@
         function handleUserLeft() {
             remoteVideo.srcObject = null;
             remoteConnectionState.textContent = "User left";
-            connectionStatus.textContent = "Remote user left the call";
+            updateStatus('Remote user left the call');
+        }
+
+        function sendSignalingMessage(message) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(message));
+            } else {
+                console.warn('Cannot send message, socket not open', message);
+            }
         }
 
         // Toggle audio mute
@@ -376,6 +489,7 @@
             }
         });
 
+        // Toggle video mute
         muteVideoBtn.addEventListener('click', () => {
             if (localStream) {
                 const videoTrack = localStream.getVideoTracks()[0];
@@ -386,7 +500,43 @@
             }
         });
 
+        // Handle hang up
         hangupBtn.addEventListener('click', () => {
+            // Send leave message
+            sendSignalingMessage({
+                type: 'leave',
+                room: roomId
+            });
+
+            // Close peer connection
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            // Stop all media tracks
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localVideo.srcObject = null;
+            }
+
+            // Clear remote video
+            remoteVideo.srcObject = null;
+
+            // Clear ping interval
+            clearInterval(pingInterval);
+
+            // Reset UI
+            joinBtn.disabled = false;
+            usernameInput.disabled = false;
+            roomIdInput.disabled = false;
+            updateStatus('Call ended');
+            remoteConnectionState.textContent = "Disconnected";
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            // Send leave message
             if (socket && socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({
                     type: 'leave',
@@ -394,22 +544,14 @@
                 }));
             }
 
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
+            // Close WebSocket
+            if (socket) {
+                socket.close();
             }
 
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localVideo.srcObject = null;
-            }
-
-            remoteVideo.srcObject = null;
-
-            joinBtn.disabled = false;
-            usernameInput.disabled = false;
-            roomIdInput.disabled = false;
-            connectionStatus.textContent = "Call ended";
+            // Clear intervals
+            clearInterval(pingInterval);
+            clearTimeout(socketReconnectTimeout);
         });
     });
 </script>

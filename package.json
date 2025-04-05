@@ -1,0 +1,11 @@
+{
+  "name": "video-call-app-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for WebRTC video calling application",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/main/resources/META-INF/resources/css/input.css -o ./src/main/resources/META-INF/resources/css/output.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.3.3"
+  }
+}

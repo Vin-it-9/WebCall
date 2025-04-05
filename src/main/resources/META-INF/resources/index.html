@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Video Call App</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div class="container mx-auto px-4 py-8">
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold text-center text-blue-600">WebRTC Video Call</h1>
+    </header>
+
+    <div class="flex flex-col md:flex-row gap-4">
+        <!-- Login Section -->
+        <div class="bg-white p-6 rounded-lg shadow-md mb-4 md:mb-0 md:w-1/3">
+            <h2 class="text-xl font-semibold mb-4">Join Call</h2>
+            <div class="mb-4">
+                <label for="username" class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                <input type="text" id="username" class="w-full p-2 border rounded-md" placeholder="Enter your username">
+            </div>
+            <div class="mb-4">
+                <label for="roomId" class="block text-sm font-medium text-gray-700 mb-1">Room ID</label>
+                <input type="text" id="roomId" class="w-full p-2 border rounded-md" placeholder="Create or join room">
+            </div>
+            <button id="joinBtn" class="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 transition">Join</button>
+            <p id="connectionStatus" class="mt-2 text-sm text-gray-600"></p>
+        </div>
+
+        <!-- Video Section -->
+        <div class="md:w-2/3">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="video-container aspect-video">
+                    <video id="localVideo" autoplay muted playsinline class="w-full h-full object-cover"></video>
+                    <div class="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded text-white text-sm">You</div>
+                </div>
+                <div class="video-container aspect-video">
+                    <video id="remoteVideo" autoplay playsinline class="w-full h-full object-cover"></video>
+                    <div class="absolute bottom-2 left-2 bg-black bg-opacity-50 px-2 py-1 rounded text-white text-sm">Remote User</div>
+                </div>
+            </div>
+
+            <div class="mt-4 flex justify-center space-x-4">
+                <button id="muteAudioBtn" class="bg-gray-700 text-white p-3 rounded-full hover:bg-gray-800">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                    </svg>
+                </button>
+                <button id="muteVideoBtn" class="bg-gray-700 text-white p-3 rounded-full hover:bg-gray-800">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                </button>
+                <button id="hangupBtn" class="bg-red-600 text-white p-3 rounded-full hover:bg-red-700">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // DOM elements
+        const joinBtn = document.getElementById('joinBtn');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const muteAudioBtn = document.getElementById('muteAudioBtn');
+        const muteVideoBtn = document.getElementById('muteVideoBtn');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const usernameInput = document.getElementById('username');
+        const roomIdInput = document.getElementById('roomId');
+        const connectionStatus = document.getElementById('connectionStatus');
+
+        // WebRTC variables
+        let localStream;
+        let peerConnection;
+        let socket;
+        let username;
+        let roomId;
+
+        // STUN servers configuration for helping with NAT traversal
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Join button click handler
+        joinBtn.addEventListener('click', async () => {
+            username = usernameInput.value.trim();
+            roomId = roomIdInput.value.trim();
+
+            if (!username || !roomId) {
+                alert('Please enter both a username and room ID');
+                return;
+            }
+
+            try {
+                // Get local media stream
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+
+                // Display local video
+                localVideo.srcObject = localStream;
+
+                // Connect to signaling server
+                connectToSignalingServer();
+
+                // Initialize peer connection
+                initializePeerConnection();
+
+                // Update UI
+                joinBtn.disabled = true;
+                usernameInput.disabled = true;
+                roomIdInput.disabled = true;
+                connectionStatus.textContent = 'Connected to room: ' + roomId;
+            } catch (err) {
+                console.error('Error accessing media devices:', err);
+                alert('Could not access camera or microphone. Please check permissions.');
+            }
+        });
+
+        // Connect to WebSocket signaling server
+        function connectToSignalingServer() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/signal/${username}`;
+
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                console.log('Connected to signaling server');
+                // Send join room message
+                sendSignalingMessage({
+                    type: 'join',
+                    room: roomId
+                });
+            };
+
+            socket.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+
+                // Handle different message types from the signaling server
+                switch(message.type) {
+                    case 'join':
+                        handleUserJoined(message);
+                        break;
+                    case 'offer':
+                        await handleOffer(message);
+                        break;
+                    case 'answer':
+                        await handleAnswer(message);
+                        break;
+                    case 'ice-candidate':
+                        await handleIceCandidate(message);
+                        break;
+                    case 'leave':
+                        handleUserLeft();
+                        break;
+                }
+            };
+
+            socket.onclose = () => {
+                console.log('Disconnected from signaling server');
+            };
+
+            socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        // Initialize WebRTC peer connection
+        function initializePeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            // Add local tracks to peer connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            // Handle incoming tracks from remote peer
+            peerConnection.ontrack = (event) => {
+                if (remoteVideo.srcObject !== event.streams[0]) {
+                    console.log('Received remote stream');
+                    remoteVideo.srcObject = event.streams[0];
+                }
+            };
+
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignalingMessage({
+                        type: 'ice-candidate',
+                        candidate: event.candidate,
+                        room: roomId
+                    });
+                }
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                console.log('ICE connection state:', peerConnection.iceConnectionState);
+            };
+        }
+
+        // Handle when a user joins the room
+        async function handleUserJoined(message) {
+            console.log('User joined:', message.username);
+
+            // Create and send an offer if we're the initiator
+            if (message.initiator) {
+                try {
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+
+                    sendSignalingMessage({
+                        type: 'offer',
+                        sdp: peerConnection.localDescription,
+                        room: roomId
+                    });
+                } catch (err) {
+                    console.error('Error creating offer:', err);
+                }
+            }
+        }
+
+        // Handle an offer from another peer
+        async function handleOffer(message) {
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                sendSignalingMessage({
+                    type: 'answer',
+                    sdp: peerConnection.localDescription,
+                    room: roomId
+                });
+            } catch (err) {
+                console.error('Error handling offer:', err);
+            }
+        }
+
+        // Handle an answer from another peer
+        async function handleAnswer(message) {
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+            } catch (err) {
+                console.error('Error handling answer:', err);
+            }
+        }
+
+        // Handle ICE candidate from another peer
+        async function handleIceCandidate(message) {
+            try {
+                if (message.candidate) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                }
+            } catch (err) {
+                console.error('Error adding ICE candidate:', err);
+            }
+        }
+
+        // Handle when a user leaves the room
+        function handleUserLeft() {
+            remoteVideo.srcObject = null;
+            connectionStatus.textContent = 'Remote user left the call';
+        }
+
+        // Send message to signaling server
+        function sendSignalingMessage(message) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(message));
+            }
+        }
+
+        // Hang up the call
+        hangupBtn.addEventListener('click', () => {
+            if (peerConnection) {
+                sendSignalingMessage({
+                    type: 'leave',
+                    room: roomId
+                });
+
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localVideo.srcObject = null;
+            }
+
+            remoteVideo.srcObject = null;
+
+            // Reset UI
+            joinBtn.disabled = false;
+            usernameInput.disabled = false;
+            roomIdInput.disabled = false;
+            connectionStatus.textContent = '';
+        });
+
+        // Toggle audio mute
+        muteAudioBtn.addEventListener('click', () => {
+            if (localStream) {
+                const audioTrack = localStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    audioTrack.enabled = !audioTrack.enabled;
+                    muteAudioBtn.classList.toggle('bg-red-600');
+                }
+            }
+        });
+
+        // Toggle video mute
+        muteVideoBtn.addEventListener('click', () => {
+            if (localStream) {
+                const videoTrack = localStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    videoTrack.enabled = !videoTrack.enabled;
+                    muteVideoBtn.classList.toggle('bg-red-600');
+                }
+            }
+        });
+    });
+</script>
+
+</body>
+</html>

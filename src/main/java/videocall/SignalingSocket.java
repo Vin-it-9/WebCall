@@ -13,6 +13,7 @@ import jakarta.websocket.Session;
 import jakarta.websocket.server.PathParam;
 import jakarta.websocket.server.ServerEndpoint;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @ServerEndpoint("/signal/{username}")
@@ -39,7 +40,15 @@ public class SignalingSocket {
         rooms.forEach((roomId, users) -> {
             boolean removed = users.remove(username);
             if (removed) {
-                broadcastToRoom(roomId, createMessage("leave", username, roomId, null));
+                try {
+                    Map<String, Object> leaveMsg = new ConcurrentHashMap<>();
+                    leaveMsg.put("type", "leave");
+                    leaveMsg.put("username", username);
+                    leaveMsg.put("room", roomId);
+                    broadcastToRoom(roomId, mapper.writeValueAsString(leaveMsg));
+                } catch (JsonProcessingException e) {
+                    System.out.println("Error creating leave message: " + e.getMessage());
+                }
             }
         });
     }
@@ -57,6 +66,8 @@ public class SignalingSocket {
             String type = (String) msgMap.get("type");
             String roomId = (String) msgMap.get("room");
 
+            System.out.println("Received " + type + " message from " + username + " for room " + roomId);
+
             if ("join".equals(type)) {
                 handleJoinRoom(username, roomId);
             } else {
@@ -68,29 +79,27 @@ public class SignalingSocket {
     }
 
     private void handleJoinRoom(String username, String roomId) {
+
         rooms.computeIfAbsent(roomId, k -> ConcurrentHashMap.newKeySet());
 
         Set<String> users = rooms.get(roomId);
-        boolean isInitiator = users.isEmpty();
-
+        boolean isFirstUser = users.isEmpty();
         users.add(username);
 
-        String joinMessage = createMessage("join", username, roomId, isInitiator);
-        broadcastToRoom(roomId, joinMessage);
-    }
+        System.out.println("User " + username + " joined room " + roomId + ". Is first user: " + isFirstUser);
+        System.out.println("Room now has users: " + users);
 
-    private String createMessage(String type, String username, String roomId, Boolean initiator) {
         try {
-            Map<String, Object> message = new ConcurrentHashMap<>();
-            message.put("type", type);
-            message.put("username", username);
-            message.put("room", roomId);
-            if (initiator != null) {
-                message.put("initiator", initiator);
-            }
-            return mapper.writeValueAsString(message);
-        } catch (Exception e) {
-            return "{}";
+            Map<String, Object> joinMsg = new ConcurrentHashMap<>();
+            joinMsg.put("type", "join");
+            joinMsg.put("username", username);
+            joinMsg.put("room", roomId);
+            joinMsg.put("initiator", isFirstUser);
+
+            String joinMessage = mapper.writeValueAsString(joinMsg);
+            broadcastToRoom(roomId, joinMessage);
+        } catch (JsonProcessingException e) {
+            System.out.println("Error creating join message: " + e.getMessage());
         }
     }
 
@@ -101,6 +110,9 @@ public class SignalingSocket {
     private void broadcastToRoom(String roomId, String message, String excludeUsername) {
         Set<String> users = rooms.get(roomId);
         if (users != null) {
+            System.out.println("Broadcasting to room " + roomId + " with " + users.size() + " users" +
+                    (excludeUsername != null ? " (excluding " + excludeUsername + ")" : ""));
+
             users.stream()
                     .filter(username -> !username.equals(excludeUsername))
                     .map(username -> sessions.get(username))
